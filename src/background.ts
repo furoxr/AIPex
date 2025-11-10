@@ -1,4 +1,6 @@
 import { Storage } from "~/lib/storage"
+import type { PlaybackStatus, RecordedEvent, RecordingState, TabSwitchRecordedEvent } from "~/lib/recording/types"
+import { MAX_EVENTS, generateEventId } from "~/lib/recording/utils"
 
 // Asset URLs for extension resources
 const logoNotion = chrome.runtime.getURL("assets/logo-notion.png")
@@ -37,6 +39,344 @@ let newtaburl = ""
 
 // Track active streaming requests for stop functionality
 const activeStreams = new Map<string, AbortController>()
+
+const RECORDING_EVENTS_KEY = 'recording:events'
+const RECORDING_STATE_KEY = 'recording:state'
+
+let recordingState: RecordingState = { active: false }
+
+interface PlaybackInternalState {
+  active: boolean
+  paused: boolean
+  index: number
+  speed: number
+  events: RecordedEvent[]
+  startedAt?: number
+  timer?: number
+}
+
+const playbackState: PlaybackInternalState = {
+  active: false,
+  paused: false,
+  index: 0,
+  speed: 1,
+  events: [],
+}
+
+function getPlaybackStatus(): PlaybackStatus {
+  return {
+    active: playbackState.active,
+    paused: playbackState.paused,
+    speed: playbackState.speed,
+    index: playbackState.index,
+    total: playbackState.events.length,
+    currentEvent: playbackState.events[playbackState.index],
+    startedAt: playbackState.startedAt,
+  }
+}
+
+function broadcast(message: any) {
+  try {
+    chrome.runtime.sendMessage(message, () => void chrome.runtime.lastError)
+  } catch (error) {
+    console.debug('Broadcast failed', error)
+  }
+}
+
+function broadcastRecordingState() {
+  broadcast({ request: 'recording:state', state: recordingState })
+}
+
+function broadcastEventsUpdated(count: number) {
+  broadcast({ request: 'recording:events-updated', count })
+}
+
+function broadcastPlaybackStatus() {
+  broadcast({ request: 'playback:status', status: getPlaybackStatus() })
+}
+
+function updateBadge() {
+  if (recordingState.active) {
+    chrome.action.setBadgeText({ text: 'REC' })
+    chrome.action.setBadgeBackgroundColor({ color: '#d23f31' })
+  } else {
+    chrome.action.setBadgeText({ text: '' })
+  }
+}
+
+async function loadRecordingState() {
+  const storage = new Storage()
+  const stored = await storage.get<RecordingState>(RECORDING_STATE_KEY)
+  recordingState = stored ?? { active: false }
+  updateBadge()
+}
+
+async function setRecordingState(state: RecordingState) {
+  const storage = new Storage()
+  recordingState = state
+  await storage.set(RECORDING_STATE_KEY, state)
+  updateBadge()
+  broadcastRecordingState()
+}
+
+async function getRecordedEvents(): Promise<RecordedEvent[]> {
+  const storage = new Storage()
+  const events = await storage.get<RecordedEvent[]>(RECORDING_EVENTS_KEY)
+  return Array.isArray(events) ? events : []
+}
+
+async function saveRecordedEvents(events: RecordedEvent[]) {
+  const storage = new Storage()
+  await storage.set(RECORDING_EVENTS_KEY, events)
+  broadcastEventsUpdated(events.length)
+}
+
+async function appendRecordedEvents(events: RecordedEvent[]) {
+  if (events.length === 0) {
+    return
+  }
+
+  const existing = await getRecordedEvents()
+  const combined = existing.concat(events)
+  const trimmed = combined.length > MAX_EVENTS ? combined.slice(combined.length - MAX_EVENTS) : combined
+  await saveRecordedEvents(trimmed)
+}
+
+async function clearRecordedEvents() {
+  const storage = new Storage()
+  await storage.remove(RECORDING_EVENTS_KEY)
+  stopPlayback()
+  playbackState.events = []
+  playbackState.index = 0
+  broadcastEventsUpdated(0)
+}
+
+async function importRecordedEvents(events: RecordedEvent[]) {
+  if (!Array.isArray(events)) {
+    throw new Error('Invalid recording payload')
+  }
+
+  const sanitized = events
+    .filter((event) => event && typeof event === 'object')
+    .map((event) => ({
+      ...event,
+      id: event.id ?? generateEventId(),
+    }))
+
+  const trimmed = sanitized.length > MAX_EVENTS ? sanitized.slice(sanitized.length - MAX_EVENTS) : sanitized
+  await saveRecordedEvents(trimmed as RecordedEvent[])
+  return trimmed.length
+}
+
+async function notifyTabs(message: any) {
+  const tabs = await chrome.tabs.query({})
+  for (const tab of tabs) {
+    if (typeof tab.id === 'number') {
+      chrome.tabs.sendMessage(tab.id, message, () => void chrome.runtime.lastError)
+    }
+  }
+}
+
+async function startRecordingSession() {
+  await setRecordingState({ active: true, startedAt: Date.now() })
+  await notifyTabs({ request: 'recording:start' })
+}
+
+async function stopRecordingSession() {
+  await setRecordingState({ active: false })
+  await notifyTabs({ request: 'recording:stop' })
+}
+
+function clearPlaybackTimer() {
+  if (playbackState.timer !== undefined) {
+    clearTimeout(playbackState.timer)
+    playbackState.timer = undefined
+  }
+}
+
+async function performDomEvent(event: RecordedEvent) {
+  if (typeof event.tabId !== 'number') {
+    return { success: false, message: 'Missing tab context' }
+  }
+
+  try {
+    await chrome.tabs.get(event.tabId)
+  } catch (error) {
+    return { success: false, message: 'Tab no longer available' }
+  }
+
+  await chrome.tabs.update(event.tabId, { active: true })
+
+  return new Promise((resolve) => {
+    chrome.tabs.sendMessage(event.tabId!, { request: 'playback:perform', event, speed: playbackState.speed }, (response) => {
+      if (chrome.runtime.lastError) {
+        resolve({ success: false, message: chrome.runtime.lastError.message })
+        return
+      }
+      resolve(response ?? { success: true })
+    })
+  })
+}
+
+function waitForTabComplete(tabId: number) {
+  return new Promise<void>((resolve) => {
+    const timeout = setTimeout(() => {
+      chrome.tabs.onUpdated.removeListener(listener)
+      resolve()
+    }, 8000)
+
+    const listener = (updatedTabId: number, info: chrome.tabs.TabChangeInfo) => {
+      if (updatedTabId === tabId && info.status === 'complete') {
+        clearTimeout(timeout)
+        chrome.tabs.onUpdated.removeListener(listener)
+        resolve()
+      }
+    }
+
+    chrome.tabs.onUpdated.addListener(listener)
+  })
+}
+
+async function handlePlaybackEvent(event: RecordedEvent) {
+  switch (event.type) {
+    case 'click':
+    case 'input':
+      return performDomEvent(event)
+    case 'navigation':
+      if (typeof event.tabId === 'number') {
+        await chrome.tabs.update(event.tabId, { url: event.toUrl })
+        await waitForTabComplete(event.tabId)
+        return { success: true }
+      }
+      return { success: false, message: 'Navigation event missing tab context' }
+    case 'tab':
+      try {
+        const target: TabSwitchRecordedEvent = event as TabSwitchRecordedEvent
+        await chrome.tabs.update(target.targetTabId, { active: true })
+        if (typeof target.windowId === 'number') {
+          await chrome.windows.update(target.windowId, { focused: true })
+        }
+        return { success: true }
+      } catch (error: any) {
+        return { success: false, message: error?.message || String(error) }
+      }
+    default:
+      return { success: true }
+  }
+}
+
+function scheduleNextPlayback(delay: number) {
+  clearPlaybackTimer()
+  if (!playbackState.active || playbackState.paused) {
+    return
+  }
+
+  playbackState.timer = setTimeout(async () => {
+    if (!playbackState.active || playbackState.paused) {
+      return
+    }
+
+    const event = playbackState.events[playbackState.index]
+    if (!event) {
+      stopPlayback()
+      return
+    }
+
+    broadcastPlaybackStatus()
+
+    try {
+      await handlePlaybackEvent(event)
+    } catch (error) {
+      console.error('Playback event failed', error)
+    }
+
+    playbackState.index += 1
+
+    if (playbackState.index >= playbackState.events.length) {
+      stopPlayback()
+    } else {
+      const currentTime = event.timestamp
+      const nextTime = playbackState.events[playbackState.index].timestamp
+      const delta = Math.max(0, nextTime - currentTime)
+      const adjusted = playbackState.speed > 0 ? delta / playbackState.speed : delta
+      const wait = Math.max(80, Math.min(4000, adjusted))
+      scheduleNextPlayback(wait)
+    }
+  }, Math.max(0, delay)) as unknown as number
+}
+
+async function startPlayback(speed = 1, events?: RecordedEvent[]) {
+  const playbackEvents = events ?? await getRecordedEvents()
+  if (playbackEvents.length === 0) {
+    return { success: false, message: 'No recorded events available' }
+  }
+
+  stopPlayback()
+
+  playbackState.active = true
+  playbackState.paused = false
+  playbackState.speed = speed
+  playbackState.events = playbackEvents
+  playbackState.index = 0
+  playbackState.startedAt = Date.now()
+
+  broadcastPlaybackStatus()
+  scheduleNextPlayback(0)
+
+  return { success: true }
+}
+
+function stopPlayback() {
+  playbackState.active = false
+  playbackState.paused = false
+  playbackState.index = 0
+  playbackState.timer = undefined
+  broadcastPlaybackStatus()
+  clearPlaybackTimer()
+}
+
+function pausePlayback() {
+  if (!playbackState.active) {
+    return
+  }
+  playbackState.paused = true
+  clearPlaybackTimer()
+  broadcastPlaybackStatus()
+}
+
+function resumePlayback() {
+  if (!playbackState.active) {
+    return
+  }
+  playbackState.paused = false
+  broadcastPlaybackStatus()
+  scheduleNextPlayback(0)
+}
+
+async function stepPlayback() {
+  if (!playbackState.active || playbackState.index >= playbackState.events.length) {
+    return
+  }
+
+  clearPlaybackTimer()
+
+  const event = playbackState.events[playbackState.index]
+  try {
+    await handlePlaybackEvent(event)
+  } catch (error) {
+    console.error('Step playback failed', error)
+  }
+
+  playbackState.index += 1
+  broadcastPlaybackStatus()
+}
+
+loadRecordingState()
+  .then(async () => {
+    const events = await getRecordedEvents()
+    broadcastEventsUpdated(events.length)
+  })
+  .catch((error) => console.error('Failed to load recording state', error))
 
 // Check if AI grouping is available
 async function isAIGroupingAvailable() {
@@ -1666,6 +2006,112 @@ let selectedTextForSidepanel = "";
 // background message listener
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   switch (message.request) {
+    case "recording:get-state":
+      (async () => {
+        const events = await getRecordedEvents()
+        sendResponse({
+          state: recordingState,
+          eventCount: events.length,
+          playback: getPlaybackStatus(),
+        })
+      })()
+      return true
+    case "recording:start":
+      (async () => {
+        await startRecordingSession()
+        sendResponse({ success: true })
+      })()
+      return true
+    case "recording:stop":
+      (async () => {
+        await stopRecordingSession()
+        sendResponse({ success: true })
+      })()
+      return true
+    case "recording:clear":
+      (async () => {
+        await clearRecordedEvents()
+        sendResponse({ success: true })
+      })()
+      return true
+    case "recording:export":
+      (async () => {
+        const events = await getRecordedEvents()
+        sendResponse({ success: true, events })
+      })()
+      return true
+    case "recording:import":
+      (async () => {
+        try {
+          const count = await importRecordedEvents(message.events || [])
+          sendResponse({ success: true, count })
+        } catch (error: any) {
+          sendResponse({ success: false, error: error?.message || String(error) })
+        }
+      })()
+      return true
+    case "recording:add-events":
+      (async () => {
+        if (!recordingState.active) {
+          sendResponse({ success: false, reason: 'inactive' })
+          return
+        }
+
+        const incoming = Array.isArray(message.events) ? message.events : []
+        if (incoming.length === 0) {
+          sendResponse({ success: true })
+          return
+        }
+
+        const enriched = incoming.map((event: RecordedEvent) => ({
+          ...event,
+          tabId: event.tabId ?? sender.tab?.id,
+          frameId: sender.frameId,
+        }))
+
+        try {
+          await appendRecordedEvents(enriched)
+          sendResponse({ success: true })
+        } catch (error: any) {
+          sendResponse({ success: false, error: error?.message || String(error) })
+        }
+      })()
+      return true
+    case "playback:start":
+      (async () => {
+        const speed = typeof message.speed === 'number' && message.speed > 0 ? message.speed : playbackState.speed
+        const events = Array.isArray(message.events) ? message.events : undefined
+        const result = await startPlayback(speed, events)
+        sendResponse(result)
+      })()
+      return true
+    case "playback:pause":
+      pausePlayback()
+      sendResponse({ success: true })
+      return true
+    case "playback:resume":
+      resumePlayback()
+      sendResponse({ success: true })
+      return true
+    case "playback:stop":
+      stopPlayback()
+      sendResponse({ success: true })
+      return true
+    case "playback:step":
+      stepPlayback()
+        .then(() => sendResponse({ success: true }))
+        .catch((error) => sendResponse({ success: false, error: String(error) }))
+      return true
+    case "playback:update-speed":
+      if (typeof message.speed === 'number' && message.speed > 0) {
+        playbackState.speed = message.speed
+        if (playbackState.active && !playbackState.paused) {
+          scheduleNextPlayback(0)
+        }
+      }
+      broadcastPlaybackStatus()
+      sendResponse({ success: true, speed: playbackState.speed })
+      return true
     case "get-actions":
       console.log("Background: Received get-actions request")
       console.log("Background: Current actions:", actions)
@@ -2146,6 +2592,30 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         }
       })()
       return true
+  }
+})
+
+chrome.tabs.onActivated.addListener(async (activeInfo) => {
+  if (!recordingState.active) {
+    return
+  }
+
+  try {
+    const tab = await chrome.tabs.get(activeInfo.tabId)
+    const event: TabSwitchRecordedEvent = {
+      id: generateEventId(),
+      type: 'tab',
+      timestamp: Date.now(),
+      url: tab.url || '',
+      tabId: tab.id,
+      targetTabId: activeInfo.tabId,
+      targetUrl: tab.url || '',
+      windowId: tab.windowId,
+    }
+
+    await appendRecordedEvents([event])
+  } catch (error) {
+    console.debug('Failed to record tab switch', error)
   }
 })
 

@@ -13,7 +13,8 @@
       "16": "assets/icon16.png",
       "48": "assets/icon48.png",
       "128": "assets/icon128.png"
-    }
+    },
+    "default_popup": "src/popup.html"
   },
   "background": {
     "service_worker": "src/background.ts",
@@ -23,6 +24,10 @@
     {
       "matches": ["<all_urls>"],
       "js": ["src/content.tsx"]
+    },
+    {
+      "matches": ["<all_urls>"],
+      "js": ["src/recorder-content.ts"]
     }
   ],
   "side_panel": {
