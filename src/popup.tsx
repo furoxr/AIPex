@@ -227,13 +227,18 @@ const PopupApp = () => {
   }, [])
 
   const stepPlaybackAction = useCallback(async () => {
+    if (!canPlayback) {
+      setFeedback({ type: 'error', message: '暂无可回放的事件。' })
+      return
+    }
+
     try {
       await sendRuntimeMessage({ request: 'playback:step' })
     } catch (error) {
       console.error('Failed to step playback', error)
       setFeedback({ type: 'error', message: '步进执行失败。' })
     }
-  }, [])
+  }, [canPlayback])
 
   const onSpeedChange = useCallback(async (event: React.ChangeEvent<HTMLSelectElement>) => {
     const nextSpeed = Number(event.target.value) || 1
@@ -357,7 +362,7 @@ const PopupApp = () => {
           <button
             onClick={stepPlaybackAction}
             className="rounded-md border border-slate-700 bg-slate-800 px-3 py-2 text-xs font-medium text-slate-100 hover:border-slate-500 disabled:cursor-not-allowed disabled:opacity-60"
-            disabled={!playbackStatus.active}
+            disabled={!canPlayback}
           >
             单步执行
           </button>

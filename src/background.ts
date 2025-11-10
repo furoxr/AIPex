@@ -53,6 +53,8 @@ interface PlaybackInternalState {
   events: RecordedEvent[]
   startedAt?: number
   timer?: number
+  tabMapping: Map<number, number>
+  defaultTabId?: number
 }
 
 const playbackState: PlaybackInternalState = {
@@ -61,6 +63,7 @@ const playbackState: PlaybackInternalState = {
   index: 0,
   speed: 1,
   events: [],
+  tabMapping: new Map<number, number>(),
 }
 
 function getPlaybackStatus(): PlaybackStatus {
@@ -177,6 +180,46 @@ async function notifyTabs(message: any) {
   }
 }
 
+async function getActiveTabId() {
+  const [activeTab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true })
+  return typeof activeTab?.id === 'number' ? activeTab.id : undefined
+}
+
+async function resolvePlaybackTabId(recordedTabId?: number): Promise<number | undefined> {
+  if (typeof recordedTabId === 'number') {
+    const mapped = playbackState.tabMapping.get(recordedTabId)
+    if (typeof mapped === 'number') {
+      return mapped
+    }
+
+    try {
+      await chrome.tabs.get(recordedTabId)
+      playbackState.tabMapping.set(recordedTabId, recordedTabId)
+      return recordedTabId
+    } catch (error) {
+      // Original tab is no longer available, fall through to default mapping
+    }
+  }
+
+  if (typeof playbackState.defaultTabId === 'number') {
+    if (typeof recordedTabId === 'number') {
+      playbackState.tabMapping.set(recordedTabId, playbackState.defaultTabId)
+    }
+    return playbackState.defaultTabId
+  }
+
+  const activeTabId = await getActiveTabId()
+  if (typeof activeTabId === 'number') {
+    playbackState.defaultTabId = activeTabId
+    if (typeof recordedTabId === 'number') {
+      playbackState.tabMapping.set(recordedTabId, activeTabId)
+    }
+    return activeTabId
+  }
+
+  return undefined
+}
+
 async function startRecordingSession() {
   await setRecordingState({ active: true, startedAt: Date.now() })
   await notifyTabs({ request: 'recording:start' })
@@ -195,20 +238,23 @@ function clearPlaybackTimer() {
 }
 
 async function performDomEvent(event: RecordedEvent) {
-  if (typeof event.tabId !== 'number') {
-    return { success: false, message: 'Missing tab context' }
+  const targetTabId = await resolvePlaybackTabId(event.tabId)
+  if (typeof targetTabId !== 'number') {
+    return { success: false, message: 'No available tab for playback' }
   }
 
   try {
-    await chrome.tabs.get(event.tabId)
+    await chrome.tabs.get(targetTabId)
   } catch (error) {
     return { success: false, message: 'Tab no longer available' }
   }
 
-  await chrome.tabs.update(event.tabId, { active: true })
+  await chrome.tabs.update(targetTabId, { active: true })
+  playbackState.defaultTabId = targetTabId
 
   return new Promise((resolve) => {
-    chrome.tabs.sendMessage(event.tabId!, { request: 'playback:perform', event, speed: playbackState.speed }, (response) => {
+    const playbackEvent = { ...event, tabId: targetTabId }
+    chrome.tabs.sendMessage(targetTabId, { request: 'playback:perform', event: playbackEvent, speed: playbackState.speed }, (response) => {
       if (chrome.runtime.lastError) {
         resolve({ success: false, message: chrome.runtime.lastError.message })
         return
@@ -243,18 +289,34 @@ async function handlePlaybackEvent(event: RecordedEvent) {
     case 'input':
       return performDomEvent(event)
     case 'navigation':
-      if (typeof event.tabId === 'number') {
-        await chrome.tabs.update(event.tabId, { url: event.toUrl })
-        await waitForTabComplete(event.tabId)
+      {
+        const targetTabId = await resolvePlaybackTabId(event.tabId)
+        if (typeof targetTabId !== 'number') {
+          return { success: false, message: 'No available tab for navigation' }
+        }
+
+        await chrome.tabs.update(targetTabId, { url: event.toUrl })
+        playbackState.defaultTabId = targetTabId
+        await waitForTabComplete(targetTabId)
         return { success: true }
       }
-      return { success: false, message: 'Navigation event missing tab context' }
     case 'tab':
       try {
         const target: TabSwitchRecordedEvent = event as TabSwitchRecordedEvent
-        await chrome.tabs.update(target.targetTabId, { active: true })
+        const resolvedTargetId = await resolvePlaybackTabId(target.targetTabId)
+        if (typeof resolvedTargetId !== 'number') {
+          return { success: false, message: 'No available tab to switch to' }
+        }
+
+        await chrome.tabs.update(resolvedTargetId, { active: true })
+        playbackState.defaultTabId = resolvedTargetId
+
         if (typeof target.windowId === 'number') {
-          await chrome.windows.update(target.windowId, { focused: true })
+          try {
+            await chrome.windows.update(target.windowId, { focused: true })
+          } catch (error) {
+            // Ignore window focus failures when the original window no longer exists
+          }
         }
         return { success: true }
       } catch (error: any) {
@@ -313,14 +375,7 @@ async function startPlayback(speed = 1, events?: RecordedEvent[]) {
 
   stopPlayback()
 
-  playbackState.active = true
-  playbackState.paused = false
-  playbackState.speed = speed
-  playbackState.events = playbackEvents
-  playbackState.index = 0
-  playbackState.startedAt = Date.now()
-
-  broadcastPlaybackStatus()
+  await preparePlayback(playbackEvents, speed, false)
   scheduleNextPlayback(0)
 
   return { success: true }
@@ -331,6 +386,8 @@ function stopPlayback() {
   playbackState.paused = false
   playbackState.index = 0
   playbackState.timer = undefined
+  playbackState.defaultTabId = undefined
+  playbackState.tabMapping.clear()
   broadcastPlaybackStatus()
   clearPlaybackTimer()
 }
@@ -354,13 +411,27 @@ function resumePlayback() {
 }
 
 async function stepPlayback() {
-  if (!playbackState.active || playbackState.index >= playbackState.events.length) {
+  clearPlaybackTimer()
+
+  if (!playbackState.active) {
+    const events = await getRecordedEvents()
+    if (events.length === 0) {
+      return
+    }
+
+    await preparePlayback(events, playbackState.speed || 1, true)
+  } else {
+    playbackState.paused = true
+    broadcastPlaybackStatus()
+  }
+
+  if (playbackState.index >= playbackState.events.length) {
+    stopPlayback()
     return
   }
 
-  clearPlaybackTimer()
-
   const event = playbackState.events[playbackState.index]
+
   try {
     await handlePlaybackEvent(event)
   } catch (error) {
@@ -368,6 +439,24 @@ async function stepPlayback() {
   }
 
   playbackState.index += 1
+
+  if (playbackState.index >= playbackState.events.length) {
+    stopPlayback()
+  } else {
+    broadcastPlaybackStatus()
+  }
+}
+
+async function preparePlayback(events: RecordedEvent[], speed: number, paused: boolean) {
+  playbackState.active = true
+  playbackState.paused = paused
+  playbackState.speed = speed
+  playbackState.events = events
+  playbackState.index = 0
+  playbackState.startedAt = Date.now()
+  playbackState.tabMapping = new Map<number, number>()
+  playbackState.defaultTabId = await getActiveTabId()
+
   broadcastPlaybackStatus()
 }
 
