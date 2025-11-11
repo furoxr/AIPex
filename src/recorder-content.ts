@@ -1,5 +1,5 @@
 import { Recorder } from './lib/recording/recorder'
-import type { RecordedEvent } from './lib/recording/types'
+import type { KeyRecordedEvent, RecordedEvent } from './lib/recording/types'
 import { summariseSelectors } from './lib/recording/utils'
 
 const recorder = new Recorder()
@@ -161,6 +161,36 @@ async function performInput(element: Element, value: string, speed: number) {
   }
 }
 
+function performKey(element: Element, event: KeyRecordedEvent) {
+  if (element instanceof HTMLElement) {
+    element.focus({ preventScroll: true })
+  }
+
+  const eventInit: KeyboardEventInit = {
+    key: event.key,
+    code: event.code,
+    bubbles: true,
+    cancelable: true,
+    altKey: event.altKey,
+    ctrlKey: event.ctrlKey,
+    shiftKey: event.shiftKey,
+    metaKey: event.metaKey,
+    repeat: event.repeat,
+  }
+
+  const keydown = new KeyboardEvent('keydown', eventInit)
+  element.dispatchEvent(keydown)
+
+  const shouldEmitKeypress = event.key.length === 1 || event.key === 'Enter'
+  if (shouldEmitKeypress) {
+    const keypress = new KeyboardEvent('keypress', eventInit)
+    element.dispatchEvent(keypress)
+  }
+
+  const keyup = new KeyboardEvent('keyup', eventInit)
+  element.dispatchEvent(keyup)
+}
+
 async function handlePlaybackEvent(event: RecordedEvent, speed: number): Promise<PlaybackResponse> {
   try {
     if (event.type === 'navigation') {
@@ -185,6 +215,8 @@ async function handlePlaybackEvent(event: RecordedEvent, speed: number): Promise
       await performClick(element)
     } else if (event.type === 'input') {
       await performInput(element, event.value, speed)
+    } else if (event.type === 'key') {
+      performKey(element, event as KeyRecordedEvent)
     }
 
     return { success: true }

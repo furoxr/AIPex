@@ -1,5 +1,5 @@
 import type { RecordedEvent } from './types'
-import { buildSelectors, describeElement, generateEventId, isSensitiveField, maskValue, normaliseUrl } from './utils'
+import { buildSelectors, describeElement, generateEventId, isSensitiveField, normaliseUrl } from './utils'
 
 type PendingEvent = Omit<RecordedEvent, 'tabId' | 'frameId'>
 
@@ -83,8 +83,6 @@ export class Recorder {
       value = target.textContent || ''
     }
 
-    const masked = maskValue(value)
-
     this.enqueue({
       id: generateEventId(),
       type: 'input',
@@ -92,8 +90,52 @@ export class Recorder {
       url: window.location.href,
       selectors: buildSelectors(target),
       descriptor: describeElement(target),
-      value: masked.value,
-      masked: masked.masked,
+      value,
+      masked: false,
+    })
+  }
+
+  private handleKeydown = (event: KeyboardEvent) => {
+    if (!this.recording || !event.isTrusted) {
+      return
+    }
+
+    if ((window as any).__aipexPlaybackActive) {
+      return
+    }
+
+    const key = event.key
+    if (!key) {
+      return
+    }
+
+    if (key.length === 1 && !event.altKey && !event.ctrlKey && !event.metaKey) {
+      return
+    }
+
+    const target = this.resolveElement(event.target, event.composedPath())
+    if (!target) {
+      return
+    }
+
+    if (isSensitiveField(target)) {
+      return
+    }
+
+    this.enqueue({
+      id: generateEventId(),
+      type: 'key',
+      timestamp: Date.now(),
+      url: window.location.href,
+      selectors: buildSelectors(target),
+      descriptor: describeElement(target),
+      key: event.key,
+      code: event.code,
+      altKey: event.altKey,
+      ctrlKey: event.ctrlKey,
+      shiftKey: event.shiftKey,
+      metaKey: event.metaKey,
+      repeat: event.repeat,
     })
   }
 
@@ -239,6 +281,7 @@ export class Recorder {
     window.addEventListener('click', this.handleClick, true)
     document.addEventListener('input', this.handleInput, true)
     document.addEventListener('change', this.handleInput, true)
+    document.addEventListener('keydown', this.handleKeydown, true)
     window.addEventListener('hashchange', this.handleHashChange)
     window.addEventListener('popstate', this.handlePopState)
     this.patchHistory()
@@ -254,6 +297,7 @@ export class Recorder {
     window.removeEventListener('click', this.handleClick, true)
     document.removeEventListener('input', this.handleInput, true)
     document.removeEventListener('change', this.handleInput, true)
+    document.removeEventListener('keydown', this.handleKeydown, true)
     window.removeEventListener('hashchange', this.handleHashChange)
     window.removeEventListener('popstate', this.handlePopState)
 

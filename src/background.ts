@@ -287,6 +287,7 @@ async function handlePlaybackEvent(event: RecordedEvent) {
   switch (event.type) {
     case 'click':
     case 'input':
+    case 'key':
       return performDomEvent(event)
     case 'navigation':
       {

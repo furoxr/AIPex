@@ -15,7 +15,7 @@ export type ElementDescriptor = {
 
 export interface RecordedEventBase {
   id: string
-  type: 'click' | 'input' | 'navigation' | 'tab'
+  type: 'click' | 'input' | 'navigation' | 'tab' | 'key'
   timestamp: number
   url: string
   tabId?: number
@@ -34,6 +34,17 @@ export interface InputRecordedEvent extends RecordedEventBase {
   type: 'input'
   value: string
   masked: boolean
+}
+
+export interface KeyRecordedEvent extends RecordedEventBase {
+  type: 'key'
+  key: string
+  code: string
+  altKey: boolean
+  ctrlKey: boolean
+  shiftKey: boolean
+  metaKey: boolean
+  repeat: boolean
 }
 
 export interface NavigationRecordedEvent extends RecordedEventBase {
@@ -55,6 +66,7 @@ export type RecordedEvent =
   | InputRecordedEvent
   | NavigationRecordedEvent
   | TabSwitchRecordedEvent
+  | KeyRecordedEvent
 
 export interface RecordingState {
   active: boolean
