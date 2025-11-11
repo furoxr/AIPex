@@ -136,7 +136,7 @@ export class Recorder {
       shiftKey: event.shiftKey,
       metaKey: event.metaKey,
       repeat: event.repeat,
-    })
+    }, { immediate: true })
   }
 
   private handleHashChange = () => {
@@ -175,9 +175,27 @@ export class Recorder {
       fromUrl,
       toUrl,
       reason,
-    })
+    }, { immediate: true })
 
     this.lastKnownUrl = toUrl
+  }
+
+  private handleVisibilityChange = () => {
+    if (document.visibilityState === 'hidden') {
+      this.flushNow()
+    }
+  }
+
+  private handlePageHide = () => {
+    this.flushNow()
+  }
+
+  private flushNow() {
+    if (this.flushTimer) {
+      window.clearTimeout(this.flushTimer)
+      this.flushTimer = undefined
+    }
+    this.flush()
   }
 
   private resolveElement(target: EventTarget | null, path?: EventTarget[]): Element | null {
@@ -195,8 +213,14 @@ export class Recorder {
     return null
   }
 
-  private enqueue(event: PendingEvent) {
+  private enqueue(event: PendingEvent, options: { immediate?: boolean } = {}) {
     this.pending.push(event)
+
+    if (options.immediate) {
+      this.flushNow()
+      return
+    }
+
     this.scheduleFlush()
   }
 
@@ -282,6 +306,9 @@ export class Recorder {
     document.addEventListener('input', this.handleInput, true)
     document.addEventListener('change', this.handleInput, true)
     document.addEventListener('keydown', this.handleKeydown, true)
+    document.addEventListener('visibilitychange', this.handleVisibilityChange, true)
+    window.addEventListener('pagehide', this.handlePageHide)
+    window.addEventListener('beforeunload', this.handlePageHide)
     window.addEventListener('hashchange', this.handleHashChange)
     window.addEventListener('popstate', this.handlePopState)
     this.patchHistory()
@@ -298,6 +325,9 @@ export class Recorder {
     document.removeEventListener('input', this.handleInput, true)
     document.removeEventListener('change', this.handleInput, true)
     document.removeEventListener('keydown', this.handleKeydown, true)
+    document.removeEventListener('visibilitychange', this.handleVisibilityChange, true)
+    window.removeEventListener('pagehide', this.handlePageHide)
+    window.removeEventListener('beforeunload', this.handlePageHide)
     window.removeEventListener('hashchange', this.handleHashChange)
     window.removeEventListener('popstate', this.handlePopState)
 
