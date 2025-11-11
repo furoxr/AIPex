@@ -2406,3 +2406,62 @@ async function downloadChatImagesInBackground(
 
 // Initialize actions
 resetOmni()
+
+// --- Record and Playback ---
+import { addEvent } from '~/features/recordAndPlayback/storage';
+import {
+  NavigateEvent,
+  RecordedEventType,
+  TabSwitchEvent,
+} from '~/features/recordAndPlayback/events';
+
+let isRecording = false;
+
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (message.request === 'startRecording') {
+    isRecording = true;
+    chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+      if (tabs[0] && tabs[0].id) {
+        chrome.tabs.sendMessage(tabs[0].id, { request: 'startRecording' });
+      }
+    });
+    chrome.action.setBadgeText({ text: 'REC' });
+    sendResponse({ status: 'recording' });
+  } else if (message.request === 'stopRecording') {
+    isRecording = false;
+    chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+      if (tabs[0] && tabs[0].id) {
+        chrome.tabs.sendMessage(tabs[0].id, { request: 'stopRecording' });
+      }
+    });
+    chrome.action.setBadgeText({ text: '' });
+    sendResponse({ status: 'stopped' });
+  }
+});
+
+chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+  if (isRecording && changeInfo.url) {
+    const navigateEvent: NavigateEvent = {
+      type: RecordedEventType.NAVIGATE,
+      timestamp: Date.now(),
+      url: changeInfo.url,
+      from: tab.url || '',
+      to: changeInfo.url,
+    };
+    addEvent(navigateEvent);
+  }
+});
+
+chrome.tabs.onActivated.addListener((activeInfo) => {
+  if (isRecording) {
+    chrome.tabs.get(activeInfo.tabId, (tab) => {
+      const tabSwitchEvent: TabSwitchEvent = {
+        type: RecordedEventType.TAB_SWITCH,
+        timestamp: Date.now(),
+        url: tab.url || '',
+        tabId: activeInfo.tabId,
+      };
+      addEvent(tabSwitchEvent);
+    });
+  }
+});
