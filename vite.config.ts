@@ -33,6 +33,7 @@ export default defineConfig({
     rollupOptions: {
       input: {
         sidepanel: path.resolve(__dirname, 'src/sidepanel.html'),
+        popup: path.resolve(__dirname, 'src/popup.html'),
       }
     },
     // Ensure CSS is extracted properly
