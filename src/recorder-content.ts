@@ -123,6 +123,10 @@ async function performClick(element: Element) {
 async function performInput(element: Element, value: string, speed: number) {
   const writableElement = element as HTMLElement & { value?: string }
 
+  if (writableElement instanceof HTMLElement) {
+    writableElement.focus({ preventScroll: true })
+  }
+
   if (writableElement instanceof HTMLInputElement || writableElement instanceof HTMLTextAreaElement) {
     writableElement.value = ''
   } else if (writableElement.isContentEditable) {
@@ -161,6 +165,29 @@ async function performInput(element: Element, value: string, speed: number) {
   }
 }
 
+function triggerEnterDefault(element: Element) {
+  const target = element as HTMLElement
+  if (!target) {
+    return
+  }
+
+  if (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement) {
+    const form = target.form
+    if (form) {
+      if (typeof form.requestSubmit === 'function') {
+        form.requestSubmit()
+      } else {
+        form.submit()
+      }
+      return
+    }
+  }
+
+  if (target instanceof HTMLElement) {
+    target.click()
+  }
+}
+
 function performKey(element: Element, event: KeyRecordedEvent) {
   if (element instanceof HTMLElement) {
     element.focus({ preventScroll: true })
@@ -189,6 +216,10 @@ function performKey(element: Element, event: KeyRecordedEvent) {
 
   const keyup = new KeyboardEvent('keyup', eventInit)
   element.dispatchEvent(keyup)
+
+  if (event.key === 'Enter') {
+    triggerEnterDefault(element)
+  }
 }
 
 async function handlePlaybackEvent(event: RecordedEvent, speed: number): Promise<PlaybackResponse> {
