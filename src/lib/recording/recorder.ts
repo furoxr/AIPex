@@ -42,7 +42,14 @@ export class Recorder {
     })
 
     const anchor = element.closest?.('a[href]') as HTMLAnchorElement | null
-    if (anchor?.href && anchor.target !== '_blank') {
+    const shouldStayInTab =
+      event.button === 0 &&
+      !event.metaKey &&
+      !event.ctrlKey &&
+      !event.shiftKey &&
+      !event.altKey
+
+    if (anchor?.href && anchor.target !== '_blank' && shouldStayInTab) {
       this.recordNavigation(window.location.href, anchor.href, 'link')
     }
   }
