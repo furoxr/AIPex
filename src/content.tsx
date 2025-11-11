@@ -891,3 +891,90 @@ function initContentScript() {
     </React.StrictMode>
   )
 }
+
+// --- Record and Playback ---
+import { Recorder } from './features/recordAndPlayback/recorder';
+
+let recorder: Recorder | null = null;
+
+chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
+  if (request.request === 'startRecording') {
+    if (!recorder) {
+      recorder = new Recorder();
+    }
+    recorder.start();
+    sendResponse({ status: 'recording' });
+  } else if (request.request === 'stopRecording') {
+    if (recorder) {
+      recorder.stop();
+    }
+    sendResponse({ status: 'stopped' });
+  } else if (request.action === 'executeClick') {
+    const element = findElement(request.event);
+    if (element) {
+      element.scrollIntoView();
+      element.click();
+      sendResponse({ status: 'success' });
+    } else {
+      sendResponse({ status: 'error', message: 'Element not found' });
+    }
+  } else if (request.action === 'executeInput') {
+    const element = findElement(request.event) as HTMLInputElement;
+    if (element) {
+      element.focus();
+      element.value = '';
+      // Simulate user typing
+      for (const char of request.event.value) {
+        const keydownEvent = new KeyboardEvent('keydown', { key: char, bubbles: true });
+        const keyupEvent = new KeyboardEvent('keyup', { key: char, bubbles: true });
+        const inputEvent = new InputEvent('input', { data: char, bubbles: true });
+        element.dispatchEvent(keydownEvent);
+        element.value += char;
+        element.dispatchEvent(inputEvent);
+        element.dispatchEvent(keyupEvent);
+      }
+      sendResponse({ status: 'success' });
+    } else {
+      sendResponse({ status: 'error', message: 'Element not found' });
+    }
+  }
+});
+
+function findElement(event: any): HTMLElement | null {
+  // 1. CSS Selector
+  let element = document.querySelector(event.selector);
+  if (element) return element as HTMLElement;
+
+  // 2. XPath
+  try {
+    const result = document.evaluate(
+      event.xpath,
+      document,
+      null,
+      XPathResult.FIRST_ORDERED_NODE_TYPE,
+      null
+    );
+    if (result.singleNodeValue) return result.singleNodeValue as HTMLElement;
+  } catch (error) {
+    console.error('Error evaluating XPath:', error);
+  }
+
+  // 3. Semantic location (fallback)
+  if (event.elementDescription) {
+    const elements = Array.from(
+      document.querySelectorAll(
+        'button, a, input, [role="button"], [aria-label]'
+      )
+    );
+    for (const el of elements) {
+      if (
+        (el as HTMLElement).innerText?.includes(event.elementDescription) ||
+        el.getAttribute('aria-label')?.includes(event.elementDescription)
+      ) {
+        return el as HTMLElement;
+      }
+    }
+  }
+
+  return null;
+}
